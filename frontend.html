@@ -1,0 +1,1119 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>FETRACK — Windows Event Tracker</title>
+
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            font-family: "Segoe UI", Arial, sans-serif;
+            background: #0f172a;
+            color: #e2e8f0;
+        }
+
+        header {
+            height: 70px;
+            background: #111827;
+            border-bottom: 1px solid #334155;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 28px;
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+        }
+
+        .logo {
+            width: 42px;
+            height: 42px;
+            border-radius: 10px;
+            background: #2563eb;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 800;
+            font-size: 18px;
+        }
+
+        .brand h1 {
+            margin: 0;
+            font-size: 20px;
+        }
+
+        .brand span {
+            color: #94a3b8;
+            font-size: 12px;
+        }
+
+        .status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 13px;
+            border-radius: 20px;
+            background: #1e293b;
+            font-size: 13px;
+        }
+
+        .status-dot {
+            width: 9px;
+            height: 9px;
+            border-radius: 50%;
+            background: #64748b;
+        }
+
+        .status.online .status-dot {
+            background: #22c55e;
+        }
+
+        .status.offline .status-dot {
+            background: #ef4444;
+        }
+
+        main {
+            padding: 28px;
+            max-width: 1800px;
+            margin: auto;
+        }
+
+        .page-title {
+            margin-bottom: 25px;
+        }
+
+        .page-title h2 {
+            margin: 0 0 5px;
+            font-size: 26px;
+        }
+
+        .page-title p {
+            margin: 0;
+            color: #94a3b8;
+        }
+
+        .cards {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 18px;
+            margin-bottom: 25px;
+        }
+
+        .card {
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 12px;
+            padding: 20px;
+        }
+
+        .card-label {
+            color: #94a3b8;
+            font-size: 13px;
+            margin-bottom: 10px;
+        }
+
+        .card-value {
+            font-size: 30px;
+            font-weight: 700;
+        }
+
+        .card-description {
+            margin-top: 8px;
+            font-size: 12px;
+            color: #64748b;
+        }
+
+        .section {
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 12px;
+            margin-bottom: 25px;
+            overflow: hidden;
+        }
+
+        .section-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 18px 20px;
+            border-bottom: 1px solid #334155;
+        }
+
+        .section-header h3 {
+            margin: 0;
+            font-size: 17px;
+        }
+
+        .section-header span {
+            color: #64748b;
+            font-size: 12px;
+        }
+
+        .table-container {
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th {
+            text-align: left;
+            padding: 13px 16px;
+            background: #172033;
+            color: #94a3b8;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: .05em;
+            white-space: nowrap;
+        }
+
+        td {
+            padding: 14px 16px;
+            border-top: 1px solid #293548;
+            font-size: 13px;
+            vertical-align: top;
+        }
+
+        tr:hover td {
+            background: #243247;
+        }
+
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 4px 8px;
+            border-radius: 5px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+
+        .badge-high {
+            background: #14532d;
+            color: #86efac;
+        }
+
+        .badge-medium {
+            background: #713f12;
+            color: #fde68a;
+        }
+
+        .badge-low {
+            background: #7f1d1d;
+            color: #fca5a5;
+        }
+
+        .badge-type {
+            background: #1e3a8a;
+            color: #bfdbfe;
+        }
+
+        .muted {
+            color: #64748b;
+        }
+
+        .empty {
+            text-align: center;
+            padding: 45px;
+            color: #64748b;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 35px;
+            color: #94a3b8;
+        }
+
+        .toolbar {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        button {
+            border: 1px solid #475569;
+            background: #334155;
+            color: #e2e8f0;
+            padding: 8px 13px;
+            border-radius: 6px;
+            cursor: pointer;
+        }
+
+        button:hover {
+            background: #475569;
+        }
+
+        .error {
+            background: #450a0a;
+            color: #fecaca;
+            border: 1px solid #7f1d1d;
+            padding: 14px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            display: none;
+        }
+
+        .process {
+            font-family: Consolas, monospace;
+            font-size: 12px;
+        }
+
+        .summary {
+            max-width: 500px;
+        }
+
+        footer {
+            text-align: center;
+            color: #475569;
+            padding: 20px;
+            font-size: 12px;
+        }
+
+        @media (max-width: 1000px) {
+            .cards {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+
+        @media (max-width: 600px) {
+            header {
+                padding: 0 15px;
+            }
+
+            main {
+                padding: 15px;
+            }
+
+            .cards {
+                grid-template-columns: 1fr;
+            }
+
+            .brand span {
+                display: none;
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+<header>
+    <div class="brand">
+        <div class="logo">FT</div>
+
+        <div>
+            <h1>FETRACK</h1>
+            <span>Windows Event Tracking & Correlation</span>
+        </div>
+    </div>
+
+    <div id="connectionStatus" class="status">
+        <div class="status-dot"></div>
+        <span id="connectionText">Connecting...</span>
+    </div>
+</header>
+
+
+<main>
+
+    <div class="page-title">
+        <h2>System Activity Dashboard</h2>
+        <p>
+            Real-time Windows event collection and deterministic activity correlation.
+        </p>
+    </div>
+
+
+    <div id="errorBox" class="error"></div>
+
+
+    <!-- STATISTICS -->
+
+    <div class="cards">
+
+        <div class="card">
+            <div class="card-label">
+                TOTAL EVENTS
+            </div>
+
+            <div id="totalEvents" class="card-value">
+                —
+            </div>
+
+            <div class="card-description">
+                Windows events collected
+            </div>
+        </div>
+
+
+        <div class="card">
+            <div class="card-label">
+                ACTIVITIES
+            </div>
+
+            <div id="totalActivities" class="card-value">
+                —
+            </div>
+
+            <div class="card-description">
+                Correlated activities
+            </div>
+        </div>
+
+
+        <div class="card">
+            <div class="card-label">
+                PROCESSES
+            </div>
+
+            <div id="totalProcesses" class="card-value">
+                —
+            </div>
+
+            <div class="card-description">
+                Processes observed
+            </div>
+        </div>
+
+
+        <div class="card">
+            <div class="card-label">
+                LAST HOUR
+            </div>
+
+            <div id="lastHour" class="card-value">
+                —
+            </div>
+
+            <div class="card-description">
+                Events received recently
+            </div>
+        </div>
+
+    </div>
+
+
+    <!-- ACTIVITIES -->
+
+    <section class="section">
+
+        <div class="section-header">
+
+            <div>
+                <h3>Detected Activities</h3>
+            </div>
+
+            <div class="toolbar">
+                <span id="activityCount">
+                    Loading...
+                </span>
+
+                <button onclick="loadActivities()">
+                    Refresh
+                </button>
+            </div>
+
+        </div>
+
+
+        <div class="table-container">
+
+            <table>
+
+                <thead>
+
+                    <tr>
+                        <th>Time</th>
+                        <th>Activity</th>
+                        <th>Confidence</th>
+                        <th>Application</th>
+                        <th>PID</th>
+                        <th>User</th>
+                        <th>Summary</th>
+                        <th>Duration</th>
+                    </tr>
+
+                </thead>
+
+                <tbody id="activitiesTable">
+
+                    <tr>
+                        <td colspan="8" class="loading">
+                            Loading activities...
+                        </td>
+                    </tr>
+
+                </tbody>
+
+            </table>
+
+        </div>
+
+    </section>
+
+
+    <!-- RAW EVENTS -->
+
+    <section class="section">
+
+        <div class="section-header">
+
+            <div>
+                <h3>Raw Windows Events</h3>
+            </div>
+
+            <div class="toolbar">
+
+                <span id="eventCount">
+                    Loading...
+                </span>
+
+                <button onclick="loadEvents()">
+                    Refresh
+                </button>
+
+            </div>
+
+        </div>
+
+
+        <div class="table-container">
+
+            <table>
+
+                <thead>
+
+                    <tr>
+                        <th>Time</th>
+                        <th>Type</th>
+                        <th>Event ID</th>
+                        <th>Provider</th>
+                        <th>Application</th>
+                        <th>Process</th>
+                        <th>PID</th>
+                        <th>User</th>
+                        <th>Message</th>
+                    </tr>
+
+                </thead>
+
+                <tbody id="eventsTable">
+
+                    <tr>
+                        <td colspan="9" class="loading">
+                            Loading events...
+                        </td>
+                    </tr>
+
+                </tbody>
+
+            </table>
+
+        </div>
+
+    </section>
+
+</main>
+
+
+<footer>
+    FETRACK &mdash; AI-free deterministic Windows event tracking
+</footer>
+
+
+<script>
+
+    const API = "/api";
+
+
+    // ========================================================
+    // UTILITIES
+    // ========================================================
+
+    function escapeHtml(value) {
+
+        if (value === null ||
+            value === undefined) {
+            return "";
+        }
+
+        return String(value)
+            .replaceAll("&", "&amp;")
+            .replaceAll("<", "&lt;")
+            .replaceAll(">", "&gt;")
+            .replaceAll('"', "&quot;")
+            .replaceAll("'", "&#039;");
+    }
+
+
+    function formatDate(value) {
+
+        if (!value) {
+            return "—";
+        }
+
+        const date = new Date(value);
+
+        if (Number.isNaN(date.getTime())) {
+            return escapeHtml(value);
+        }
+
+        return date.toLocaleString();
+    }
+
+
+    function formatTime(value) {
+
+        if (!value) {
+            return "—";
+        }
+
+        const date = new Date(value);
+
+        if (Number.isNaN(date.getTime())) {
+            return "—";
+        }
+
+        return date.toLocaleTimeString();
+    }
+
+
+    function formatDuration(start, end) {
+
+        if (!start) {
+            return "—";
+        }
+
+        const startDate =
+            new Date(start);
+
+        const endDate =
+            end
+                ? new Date(end)
+                : new Date();
+
+        const seconds =
+            Math.max(
+                0,
+                Math.floor(
+                    (endDate - startDate) / 1000
+                )
+            );
+
+        if (seconds < 60) {
+            return `${seconds}s`;
+        }
+
+        const minutes =
+            Math.floor(seconds / 60);
+
+        if (minutes < 60) {
+            return `${minutes}m ${seconds % 60}s`;
+        }
+
+        const hours =
+            Math.floor(minutes / 60);
+
+        return `${hours}h ${minutes % 60}m`;
+    }
+
+
+    function confidenceBadge(value) {
+
+        const confidence =
+            String(value || "UNKNOWN")
+                .toUpperCase();
+
+        let className =
+            "badge-low";
+
+        if (confidence === "HIGH") {
+            className = "badge-high";
+        }
+        else if (confidence === "MEDIUM") {
+            className = "badge-medium";
+        }
+
+        return `
+            <span class="badge ${className}">
+                ${escapeHtml(confidence)}
+            </span>
+        `;
+    }
+
+
+    function typeBadge(value) {
+
+        return `
+            <span class="badge badge-type">
+                ${escapeHtml(value || "UNKNOWN")}
+            </span>
+        `;
+    }
+
+
+    // ========================================================
+    // CONNECTION
+    // ========================================================
+
+    function setConnection(online) {
+
+        const status =
+            document.getElementById(
+                "connectionStatus"
+            );
+
+        const text =
+            document.getElementById(
+                "connectionText"
+            );
+
+        if (online) {
+
+            status.className =
+                "status online";
+
+            text.textContent =
+                "Collector Online";
+
+        }
+        else {
+
+            status.className =
+                "status offline";
+
+            text.textContent =
+                "Backend Offline";
+
+        }
+    }
+
+
+    function showError(message) {
+
+        const box =
+            document.getElementById(
+                "errorBox"
+            );
+
+        box.textContent =
+            message;
+
+        box.style.display =
+            "block";
+    }
+
+
+    function clearError() {
+
+        const box =
+            document.getElementById(
+                "errorBox"
+            );
+
+        box.style.display =
+            "none";
+    }
+
+
+    // ========================================================
+    // HEALTH CHECK
+    // ========================================================
+
+    async function checkHealth() {
+
+        try {
+
+            const response =
+                await fetch(
+                    `${API}/health`,
+                    {
+                        cache: "no-store"
+                    }
+                );
+
+            if (!response.ok) {
+                throw new Error(
+                    "Backend returned an error."
+                );
+            }
+
+            setConnection(true);
+
+            clearError();
+
+        }
+        catch (error) {
+
+            setConnection(false);
+
+            showError(
+                "Unable to connect to the FETRACK backend."
+            );
+        }
+    }
+
+
+    // ========================================================
+    // STATISTICS
+    // ========================================================
+
+    async function loadStats() {
+
+        try {
+
+            const response =
+                await fetch(
+                    `${API}/stats`,
+                    {
+                        cache: "no-store"
+                    }
+                );
+
+            if (!response.ok) {
+                throw new Error(
+                    "Statistics request failed."
+                );
+            }
+
+            const stats =
+                await response.json();
+
+            document.getElementById(
+                "totalEvents"
+            ).textContent =
+                stats.totalEvents ?? 0;
+
+            document.getElementById(
+                "totalActivities"
+            ).textContent =
+                stats.totalActivities ?? 0;
+
+            document.getElementById(
+                "totalProcesses"
+            ).textContent =
+                stats.totalProcesses ?? 0;
+
+            document.getElementById(
+                "lastHour"
+            ).textContent =
+                stats.eventsLastHour ?? 0;
+
+        }
+        catch (error) {
+
+            console.error(
+                "Stats error:",
+                error
+            );
+        }
+    }
+
+
+    // ========================================================
+    // ACTIVITIES
+    // ========================================================
+
+    async function loadActivities() {
+
+        const table =
+            document.getElementById(
+                "activitiesTable"
+            );
+
+        try {
+
+            table.innerHTML = `
+                <tr>
+                    <td colspan="8" class="loading">
+                        Loading activities...
+                    </td>
+                </tr>
+            `;
+
+            const response =
+                await fetch(
+                    `${API}/activities?limit=100`,
+                    {
+                        cache: "no-store"
+                    }
+                );
+
+            if (!response.ok) {
+                throw new Error(
+                    "Activity request failed."
+                );
+            }
+
+            const activities =
+                await response.json();
+
+            document.getElementById(
+                "activityCount"
+            ).textContent =
+                `${activities.length} records`;
+
+            if (!activities.length) {
+
+                table.innerHTML = `
+                    <tr>
+                        <td colspan="8" class="empty">
+                            No activities detected yet.
+                        </td>
+                    </tr>
+                `;
+
+                return;
+            }
+
+
+            table.innerHTML =
+                activities.map(activity => {
+
+                    return `
+                        <tr>
+
+                            <td>
+                                ${formatDate(activity.startUtc)}
+                            </td>
+
+                            <td>
+                                ${typeBadge(activity.type)}
+                            </td>
+
+                            <td>
+                                ${confidenceBadge(activity.confidence)}
+                            </td>
+
+                            <td>
+                                <strong>
+                                    ${escapeHtml(activity.application || "Unknown")}
+                                </strong>
+                            </td>
+
+                            <td class="process">
+                                ${activity.processId ?? "—"}
+                            </td>
+
+                            <td>
+                                ${escapeHtml(activity.userName || "—")}
+                            </td>
+
+                            <td class="summary">
+                                ${escapeHtml(activity.summary || "—")}
+                            </td>
+
+                            <td>
+                                ${formatDuration(
+                                    activity.startUtc,
+                                    activity.endUtc
+                                )}
+                            </td>
+
+                        </tr>
+                    `;
+
+                }).join("");
+
+        }
+        catch (error) {
+
+            console.error(
+                "Activities error:",
+                error
+            );
+
+            table.innerHTML = `
+                <tr>
+                    <td colspan="8" class="empty">
+                        Unable to load activities.
+                    </td>
+                </tr>
+            `;
+        }
+    }
+
+
+    // ========================================================
+    // RAW EVENTS
+    // ========================================================
+
+    async function loadEvents() {
+
+        const table =
+            document.getElementById(
+                "eventsTable"
+            );
+
+        try {
+
+            table.innerHTML = `
+                <tr>
+                    <td colspan="9" class="loading">
+                        Loading events...
+                    </td>
+                </tr>
+            `;
+
+            const response =
+                await fetch(
+                    `${API}/events?limit=100&offset=0`,
+                    {
+                        cache: "no-store"
+                    }
+                );
+
+            if (!response.ok) {
+                throw new Error(
+                    "Events request failed."
+                );
+            }
+
+            const events =
+                await response.json();
+
+            document.getElementById(
+                "eventCount"
+            ).textContent =
+                `${events.length} records`;
+
+            if (!events.length) {
+
+                table.innerHTML = `
+                    <tr>
+                        <td colspan="9" class="empty">
+                            No Windows events collected yet.
+                        </td>
+                    </tr>
+                `;
+
+                return;
+            }
+
+
+            table.innerHTML =
+                events.map(event => {
+
+                    return `
+                        <tr>
+
+                            <td>
+                                ${formatDate(event.timestampUtc)}
+                            </td>
+
+                            <td>
+                                ${typeBadge(event.eventType)}
+                            </td>
+
+                            <td>
+                                ${escapeHtml(event.eventId)}
+                            </td>
+
+                            <td>
+                                ${escapeHtml(event.provider || "—")}
+                            </td>
+
+                            <td>
+                                ${escapeHtml(
+                                    event.application ||
+                                    event.processName ||
+                                    "—"
+                                )}
+                            </td>
+
+                            <td class="process">
+                                ${escapeHtml(
+                                    event.processName ||
+                                    "—"
+                                )}
+                            </td>
+
+                            <td class="process">
+                                ${event.processId ?? "—"}
+                            </td>
+
+                            <td>
+                                ${escapeHtml(
+                                    event.userName ||
+                                    "—"
+                                )}
+                            </td>
+
+                            <td class="summary">
+                                ${escapeHtml(
+                                    event.message ||
+                                    "—"
+                                )}
+                            </td>
+
+                        </tr>
+                    `;
+
+                }).join("");
+
+        }
+        catch (error) {
+
+            console.error(
+                "Events error:",
+                error
+            );
+
+            table.innerHTML = `
+                <tr>
+                    <td colspan="9" class="empty">
+                        Unable to load events.
+                    </td>
+                </tr>
+            `;
+        }
+    }
+
+
+    // ========================================================
+    // LOAD EVERYTHING
+    // ========================================================
+
+    async function refreshDashboard() {
+
+        await checkHealth();
+
+        await Promise.all([
+            loadStats(),
+            loadActivities(),
+            loadEvents()
+        ]);
+    }
+
+
+    // ========================================================
+    // START DASHBOARD
+    // ========================================================
+
+    refreshDashboard();
+
+
+    // Refresh every 10 seconds.
+
+    setInterval(
+        refreshDashboard,
+        10000
+    );
+
+</script>
+
+</body>
+</html>

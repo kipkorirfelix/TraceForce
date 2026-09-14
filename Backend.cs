@@ -1,0 +1,1366 @@
+﻿using System.Diagnostics.Eventing.Reader;
+using System.Text.Json;
+using System.Xml.Linq;
+
+var builder = WebApplication.CreateBuilder(args);
+
+builder.WebHost.UseUrls("http://localhost:5000");
+
+var app = builder.Build();
+
+// ------------------------------------------------------------
+// FETRACK Windows Audit Initialization
+// Must happen BEFORE the event collector starts.
+// ------------------------------------------------------------
+
+if (!WindowsAuditManager.IsAdministrator())
+{
+    Console.WriteLine("[Security] Administrator permission is required.");
+
+    if (WindowsAuditManager.RestartElevated())
+    {
+        Console.WriteLine("[Security] Elevation requested. Closing non-elevated instance.");
+        return;
+    }
+
+    Console.WriteLine("[Security] User declined elevation.");
+    Console.WriteLine("[Security] FETRACK will continue with limited event collection.");
+}
+else
+{
+    Console.WriteLine("[Security] FETRACK is running as Administrator.");
+
+    WindowsAuditManager.EnableRequiredAuditing();
+}
+
+Database.Initialize();
+
+var collector = new WindowsEventCollector();
+var correlation = new CorrelationEngine();
+
+collector.EventReceived += async record =>
+{
+    try
+    {
+        long eventId = Database.InsertEvent(record);
+        await correlation.ProcessAsync(record, eventId);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Event processing error: {ex.Message}");
+    }
+};
+
+collector.Start();
+
+app.MapGet("/", async context =>
+{
+    var outputFile = Path.Combine(AppContext.BaseDirectory, "frontend.html");
+    var projectFile = Path.Combine(Directory.GetCurrentDirectory(), "frontend.html");
+
+    var file = File.Exists(outputFile)
+        ? outputFile
+        : projectFile;
+
+    if (!File.Exists(file))
+    {
+        context.Response.StatusCode = 404;
+        await context.Response.WriteAsync("frontend.html not found.");
+        return;
+    }
+
+    context.Response.ContentType = "text/html; charset=utf-8";
+    await context.Response.SendFileAsync(file);
+});
+
+app.MapGet("/api/audit", () =>
+{
+    var status = WindowsAuditManager.GetStatus();
+
+    return Results.Ok(status);
+});
+app.MapGet("/api/health", () =>
+{
+    return Results.Ok(new
+    {
+        status = "online",
+        time = DateTime.UtcNow
+    });
+});
+
+app.MapGet("/api/stats", () =>
+{
+    return Results.Ok(Database.GetStatistics());
+});
+
+app.MapGet("/api/events", (int? limit, int? offset) =>
+{
+    int take = Math.Clamp(limit ?? 100, 1, 1000);
+    int skip = Math.Max(offset ?? 0, 0);
+
+    return Results.Ok(Database.GetEvents(take, skip));
+});
+
+app.MapGet("/api/activities", (int? limit) =>
+{
+    int take = Math.Clamp(limit ?? 100, 1, 1000);
+
+    return Results.Ok(Database.GetActivities(take));
+});
+
+app.MapPost("/api/maintenance/cleanup", (int? days) =>
+{
+    int retentionDays = Math.Clamp(days ?? 30, 1, 3650);
+
+    Database.Cleanup(retentionDays);
+
+    return Results.Ok(new
+    {
+        message = $"Events older than {retentionDays} days were removed."
+    });
+});
+
+app.Lifetime.ApplicationStopping.Register(() =>
+{
+    collector.Stop();
+});
+
+Console.WriteLine("======================================");
+Console.WriteLine(" FETRACK - Windows Event Tracker");
+Console.WriteLine("======================================");
+Console.WriteLine("Dashboard: http://localhost:5000");
+Console.WriteLine("Event collection: ACTIVE");
+Console.WriteLine("Rule-based correlation: ACTIVE");
+Console.WriteLine("Press Ctrl+C to stop.");
+Console.WriteLine();
+
+app.Run();
+
+
+// ============================================================
+// WINDOWS EVENT COLLECTOR
+// ============================================================
+
+public class WindowsEventCollector
+{
+    private readonly List<EventLogWatcher> watchers = new();
+
+    public event Func<RawEvent, Task>? EventReceived;
+
+    public void Start()
+    {
+        StartLog("Application");
+        StartLog("System");
+
+        try
+        {
+            StartLog("Security");
+            Console.WriteLine("[Collector] Security log watcher started.");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine(
+                $"[Collector] Security log unavailable: {ex.Message}");
+        }
+
+        Console.WriteLine("[Collector] Application and System watchers started.");
+    }
+
+    private void StartLog(string logName)
+    {
+        try
+        {
+            var query = new EventLogQuery(
+                logName,
+                PathType.LogName,
+                "*");
+
+            var watcher = new EventLogWatcher(query);
+
+            watcher.EventRecordWritten += OnEventRecordWritten;
+
+            watcher.Enabled = true;
+
+            watchers.Add(watcher);
+
+            Console.WriteLine(
+                $"[Collector] Watching {logName} log.");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine(
+                $"[Collector] Could not watch {logName}: {ex.Message}");
+        }
+    }
+
+    private async void OnEventRecordWritten(
+        object? sender,
+        EventRecordWrittenEventArgs e)
+    {
+        if (e.EventRecord == null)
+            return;
+
+        try
+        {
+            RawEvent record = ParseEvent(e.EventRecord);
+
+            if (EventReceived != null)
+                await EventReceived(record);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine(
+                $"[Collector] Parse error: {ex.Message}");
+        }
+    }
+
+    private static RawEvent ParseEvent(EventRecord record)
+    {
+        string provider =
+            record.ProviderName ?? "";
+
+        int eventId =
+            record.Id;
+
+        string logName =
+            record.LogName ?? "";
+
+        string level =
+            record.LevelDisplayName ?? "";
+
+        string xml =
+            "";
+
+        try
+        {
+            xml = record.ToXml();
+        }
+        catch
+        {
+            // Some records may not provide XML.
+        }
+
+        var data = new Dictionary<string, string>(
+            StringComparer.OrdinalIgnoreCase);
+
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(xml))
+            {
+                var document = XDocument.Parse(xml);
+
+                foreach (var element in document
+                    .Descendants()
+                    .Where(x => x.Name.LocalName == "Data"))
+                {
+                    var name = element.Attribute("Name")?.Value;
+
+                    if (!string.IsNullOrWhiteSpace(name))
+                    {
+                        data[name] = element.Value;
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // Ignore malformed event XML.
+        }
+
+        int? processId =
+            GetInt(data, "NewProcessId") ??
+            GetInt(data, "ProcessId");
+
+        int? parentProcessId =
+            GetInt(data, "ParentProcessId");
+
+        string processName =
+            GetValue(
+                data,
+                "NewProcessName",
+                "ProcessName",
+                "ImageName");
+
+        string userName =
+            GetValue(
+                data,
+                "TargetUserName",
+                "SubjectUserName",
+                "UserName");
+
+        string application =
+            GetApplicationName(processName);
+
+        string eventType =
+            DetermineEventType(
+                logName,
+                provider,
+                eventId);
+
+        string message = "";
+
+        try
+        {
+            message = record.FormatDescription() ?? "";
+        }
+        catch
+        {
+            message = "";
+        }
+
+        string machineName =
+            Environment.MachineName;
+
+        string payloadJson =
+            JsonSerializer.Serialize(data);
+
+        return new RawEvent
+        {
+            TimestampUtc =
+                record.TimeCreated?.ToUniversalTime()
+                ?? DateTime.UtcNow,
+
+            MachineId =
+                machineName,
+
+            UserName =
+                userName,
+
+            Source =
+                logName,
+
+            Provider =
+                provider,
+
+            EventId =
+                eventId,
+
+            Level =
+                level,
+
+            EventType =
+                eventType,
+
+            ProcessId =
+                processId,
+
+            ParentProcessId =
+                parentProcessId,
+
+            ProcessName =
+                processName,
+
+            Application =
+                application,
+
+            Message =
+                message,
+
+            PayloadJson =
+                payloadJson
+        };
+    }
+
+    private static string DetermineEventType(
+        string logName,
+        string provider,
+        int eventId)
+    {
+        // Security process and logon events
+        if (logName.Equals("Security", StringComparison.OrdinalIgnoreCase))
+        {
+            if (eventId == 4688)
+                return "PROCESS_START";
+
+            if (eventId == 4689)
+                return "PROCESS_END";
+
+            if (eventId == 4624)
+                return "LOGIN";
+
+            if (eventId == 4634 || eventId == 4647)
+                return "LOGOUT";
+        }
+
+        // Application crash: Event ID 1000 only means a crash
+        // when generated by the Application Error provider.
+        if (eventId == 1000 &&
+            provider.Equals(
+                "Application Error",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return "APPLICATION_CRASH";
+        }
+
+        // Windows Error Reporting crash evidence.
+        if (eventId == 1001 &&
+            provider.Equals(
+                "Windows Error Reporting",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return "CRASH_REPORT";
+        }
+
+        if (provider.Contains(
+                "Kernel-PnP",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return "DEVICE";
+        }
+
+        if (provider.Contains(
+                "Service Control Manager",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return "SERVICE";
+        }
+
+        if (provider.Contains(
+                "Windows Update",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return "UPDATE";
+        }
+
+        if (provider.Contains(
+                "BITS",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return "NETWORK";
+        }
+
+        return logName.ToUpperInvariant();
+    }
+
+    private static string GetApplicationName(
+        string processName)
+    {
+        if (string.IsNullOrWhiteSpace(processName))
+            return "";
+
+        string name =
+            Path.GetFileNameWithoutExtension(processName);
+
+        if (string.IsNullOrWhiteSpace(name))
+            return "";
+
+        return name.ToLowerInvariant() switch
+        {
+            "chrome" => "Google Chrome",
+            "msedge" => "Microsoft Edge",
+            "firefox" => "Mozilla Firefox",
+            "explorer" => "Windows Explorer",
+            "code" => "Visual Studio Code",
+            "winword" => "Microsoft Word",
+            "excel" => "Microsoft Excel",
+            "powerpnt" => "Microsoft PowerPoint",
+            "outlook" => "Microsoft Outlook",
+            "teams" => "Microsoft Teams",
+            "whatsapp" => "WhatsApp",
+            "java" => "Java",
+            "python" => "Python",
+            "powershell" => "PowerShell",
+            "pwsh" => "PowerShell",
+            "cmd" => "Command Prompt",
+            "notepad" => "Notepad",
+            "calc" => "Calculator",
+            "devenv" => "Visual Studio",
+            _ => name
+        };
+    }
+
+    private static string GetValue(
+        Dictionary<string, string> data,
+        params string[] keys)
+    {
+        foreach (var key in keys)
+        {
+            if (data.TryGetValue(key, out var value) &&
+                !string.IsNullOrWhiteSpace(value))
+            {
+                return value;
+            }
+        }
+
+        return "";
+    }
+
+    private static int? GetInt(
+        Dictionary<string, string> data,
+        string key)
+    {
+        if (!data.TryGetValue(key, out var value))
+            return null;
+
+        if (string.IsNullOrWhiteSpace(value))
+            return null;
+
+        value = value.Trim();
+
+        if (value.StartsWith("0x",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            if (int.TryParse(
+                    value[2..],
+                    System.Globalization.NumberStyles.HexNumber,
+                    null,
+                    out int hex))
+            {
+                return hex;
+            }
+        }
+
+        if (int.TryParse(value, out int result))
+            return result;
+
+        return null;
+    }
+
+    public void Stop()
+    {
+        foreach (var watcher in watchers)
+        {
+            try
+            {
+                watcher.Enabled = false;
+                watcher.Dispose();
+            }
+            catch
+            {
+                // Ignore shutdown errors.
+            }
+        }
+
+        watchers.Clear();
+
+        Console.WriteLine("[Collector] Stopped.");
+    }
+}
+
+
+// ============================================================
+// RULE-BASED CORRELATION ENGINE
+// ============================================================
+
+public class CorrelationEngine
+{
+    private readonly Dictionary<int, ProcessSession> sessions = new();
+
+    private readonly List<RecentCrash> recentCrashes = new();
+
+    private readonly object sync = new();
+
+    private readonly TimeSpan sessionTimeout =
+        TimeSpan.FromMinutes(30);
+
+    private readonly TimeSpan crashCorrelationWindow =
+        TimeSpan.FromMinutes(2);
+
+    public async Task ProcessAsync(
+        RawEvent record,
+        long eventId)
+    {
+        lock (sync)
+        {
+            ExpireSessions(record.TimestampUtc);
+            ExpireCrashes(record.TimestampUtc);
+
+            if (IsProcessStart(record))
+            {
+                HandleProcessStart(record, eventId);
+                return;
+            }
+
+            if (IsProcessEnd(record))
+            {
+                HandleProcessEnd(record, eventId);
+                return;
+            }
+
+            if (IsLogin(record))
+            {
+                CreateSimpleActivity(
+                    record,
+                    eventId,
+                    "LOGIN",
+                    "HIGH",
+                    "User login detected.");
+
+                return;
+            }
+
+            if (IsLogout(record))
+            {
+                CreateSimpleActivity(
+                    record,
+                    eventId,
+                    "LOGOUT",
+                    "HIGH",
+                    "User logout detected.");
+
+                return;
+            }
+
+            if (IsApplicationCrash(record))
+            {
+                HandleApplicationCrash(record, eventId);
+                return;
+            }
+
+            if (IsCrashReport(record))
+            {
+                HandleCrashReport(record, eventId);
+                return;
+            }
+
+            if (record.ProcessId.HasValue &&
+                sessions.TryGetValue(
+                    record.ProcessId.Value,
+                    out var session))
+            {
+                session.EventCount++;
+
+                string relation = "CORRELATED";
+
+                if (record.EventType == "NETWORK")
+                {
+                    session.NetworkEvents++;
+                    relation = "NETWORK";
+                }
+
+                if (record.EventType == "DEVICE")
+                {
+                    session.DeviceEvents++;
+                    relation = "DEVICE";
+                }
+
+                Database.LinkEvent(
+                    session.ActivityId,
+                    eventId,
+                    relation);
+
+                // The process is still running.
+                // Do not modify EndUtc.
+            }
+        }
+
+        await Task.CompletedTask;
+    }
+
+    private static bool IsProcessStart(RawEvent record)
+    {
+        return record.Source.Equals(
+                   "Security",
+                   StringComparison.OrdinalIgnoreCase)
+               && record.EventId == 4688;
+    }
+
+    private static bool IsProcessEnd(RawEvent record)
+    {
+        return record.Source.Equals(
+                   "Security",
+                   StringComparison.OrdinalIgnoreCase)
+               && record.EventId == 4689;
+    }
+
+    private static bool IsLogin(RawEvent record)
+    {
+        return record.Source.Equals(
+                   "Security",
+                   StringComparison.OrdinalIgnoreCase)
+               && record.EventId == 4624;
+    }
+
+    private static bool IsLogout(RawEvent record)
+    {
+        return record.Source.Equals(
+                   "Security",
+                   StringComparison.OrdinalIgnoreCase)
+               && (record.EventId == 4634 ||
+                   record.EventId == 4647);
+    }
+
+    private static bool IsApplicationCrash(RawEvent record)
+    {
+        if (record.EventId != 1000)
+            return false;
+
+        if (!record.Provider.Equals(
+                "Application Error",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return ContainsCrashEvidence(record);
+    }
+
+    private static bool IsCrashReport(RawEvent record)
+    {
+        return record.EventId == 1001 &&
+               record.Provider.Equals(
+                   "Windows Error Reporting",
+                   StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool ContainsCrashEvidence(RawEvent record)
+    {
+        string message = record.Message ?? "";
+
+        return message.Contains(
+                   "Faulting application name",
+                   StringComparison.OrdinalIgnoreCase)
+               || message.Contains(
+                   "Faulting process id",
+                   StringComparison.OrdinalIgnoreCase)
+               || message.Contains(
+                   "Exception code",
+                   StringComparison.OrdinalIgnoreCase)
+               || message.Contains(
+                   "AppName",
+                   StringComparison.OrdinalIgnoreCase)
+               || message.Contains(
+                   "FaultingApplication",
+                   StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void HandleProcessStart(
+        RawEvent record,
+        long eventId)
+    {
+        int pid = record.ProcessId!.Value;
+
+        if (sessions.TryGetValue(pid, out var existing))
+        {
+            CloseSession(
+                existing,
+                record.TimestampUtc,
+                "MEDIUM",
+                "Previous process session closed because the PID was reused.");
+
+            sessions.Remove(pid);
+        }
+
+        string application =
+            string.IsNullOrWhiteSpace(record.Application)
+                ? record.ProcessName
+                : record.Application;
+
+        string summary =
+            $"Application started: {application} (PID {pid})";
+
+        var activity = new Activity
+        {
+            StartUtc = record.TimestampUtc,
+            EndUtc = null,
+            MachineId = record.MachineId,
+            UserName = record.UserName,
+            Type = "APPLICATION_SESSION",
+            Application = application,
+            ProcessId = pid,
+            Confidence = "HIGH",
+            Summary = summary,
+            CreatedUtc = DateTime.UtcNow
+        };
+
+        long activityId =
+            Database.InsertActivity(activity);
+
+        Database.LinkEvent(
+            activityId,
+            eventId,
+            "START");
+
+        sessions[pid] =
+            new ProcessSession
+            {
+                ActivityId = activityId,
+                ProcessId = pid,
+                ParentProcessId = record.ParentProcessId,
+                StartUtc = record.TimestampUtc,
+                Application = application,
+                ProcessName = record.ProcessName,
+                UserName = record.UserName,
+                EventCount = 1
+            };
+
+        Console.WriteLine(
+            $"[Correlation] START {application} PID={pid}");
+    }
+
+    private void HandleProcessEnd(
+        RawEvent record,
+        long eventId)
+    {
+        int pid = record.ProcessId!.Value;
+
+        if (!sessions.TryGetValue(pid, out var session))
+        {
+            CreateSimpleActivity(
+                record,
+                eventId,
+                "PROCESS_END",
+                "MEDIUM",
+                $"Process ended: {record.ProcessName} (PID {pid})");
+
+            return;
+        }
+
+        session.EventCount++;
+
+        Database.LinkEvent(
+            session.ActivityId,
+            eventId,
+            "END");
+
+        string confidence =
+            DetermineSessionConfidence(session);
+
+        string summary =
+            BuildSessionSummary(session);
+
+        Database.UpdateActivityEnd(
+            session.ActivityId,
+            record.TimestampUtc,
+            confidence,
+            summary);
+
+        sessions.Remove(pid);
+
+        Console.WriteLine(
+            $"[Correlation] END {session.Application} PID={pid}");
+    }
+
+    private void HandleApplicationCrash(
+        RawEvent record,
+        long eventId)
+    {
+        string application =
+            string.IsNullOrWhiteSpace(record.Application)
+                ? record.ProcessName
+                : record.Application;
+
+        string summary =
+            $"Application crash detected: {application}";
+
+        var activity = new Activity
+        {
+            StartUtc = record.TimestampUtc,
+            EndUtc = record.TimestampUtc,
+            MachineId = record.MachineId,
+            UserName = record.UserName,
+            Type = "APPLICATION_CRASH",
+            Application = application,
+            ProcessId = record.ProcessId,
+            Confidence = "HIGH",
+            Summary = summary,
+            CreatedUtc = DateTime.UtcNow
+        };
+
+        long activityId =
+            Database.InsertActivity(activity);
+
+        Database.LinkEvent(
+            activityId,
+            eventId,
+            "CRASH");
+
+        recentCrashes.Add(
+            new RecentCrash
+            {
+                ActivityId = activityId,
+                TimestampUtc = record.TimestampUtc,
+                ProcessId = record.ProcessId,
+                Application = application
+            });
+
+        Console.WriteLine(
+            $"[Correlation] CRASH {application}");
+    }
+
+    private void HandleCrashReport(
+        RawEvent record,
+        long eventId)
+    {
+        RecentCrash? crash =
+            FindMatchingCrash(record);
+
+        if (crash != null)
+        {
+            Database.LinkEvent(
+                crash.ActivityId,
+                eventId,
+                "CRASH_REPORT");
+
+            Console.WriteLine(
+                $"[Correlation] WER evidence linked to {crash.Application}");
+
+            return;
+        }
+
+        string application =
+            string.IsNullOrWhiteSpace(record.Application)
+                ? record.ProcessName
+                : record.Application;
+
+        CreateSimpleActivity(
+            record,
+            eventId,
+            "CRASH_REPORT",
+            "MEDIUM",
+            $"Windows Error Reporting record for {application}");
+    }
+
+    private RecentCrash? FindMatchingCrash(
+        RawEvent record)
+    {
+        DateTime earliest =
+            record.TimestampUtc - crashCorrelationWindow;
+
+        return recentCrashes
+            .Where(x =>
+                x.TimestampUtc >= earliest &&
+                x.TimestampUtc <= record.TimestampUtc)
+            .Where(x =>
+                (record.ProcessId.HasValue &&
+                 x.ProcessId.HasValue &&
+                 record.ProcessId.Value == x.ProcessId.Value)
+                ||
+                (!string.IsNullOrWhiteSpace(record.ProcessName) &&
+                 !string.IsNullOrWhiteSpace(x.Application) &&
+                 record.ProcessName.Contains(
+                     Path.GetFileNameWithoutExtension(
+                         x.Application),
+                     StringComparison.OrdinalIgnoreCase)))
+            .OrderByDescending(x => x.TimestampUtc)
+            .FirstOrDefault();
+    }
+
+    private void CreateSimpleActivity(
+        RawEvent record,
+        long eventId,
+        string type,
+        string confidence,
+        string summary)
+    {
+        var activity = new Activity
+        {
+            StartUtc = record.TimestampUtc,
+            EndUtc = record.TimestampUtc,
+            MachineId = record.MachineId,
+            UserName = record.UserName,
+            Type = type,
+            Application = record.Application,
+            ProcessId = record.ProcessId,
+            Confidence = confidence,
+            Summary = summary,
+            CreatedUtc = DateTime.UtcNow
+        };
+
+        long activityId =
+            Database.InsertActivity(activity);
+
+        Database.LinkEvent(
+            activityId,
+            eventId,
+            "DIRECT");
+    }
+
+    private void ExpireSessions(DateTime nowUtc)
+    {
+        var expired =
+            sessions.Values
+                .Where(x =>
+                    nowUtc - x.StartUtc > sessionTimeout)
+                .ToList();
+
+        foreach (var session in expired)
+        {
+            CloseSession(
+                session,
+                nowUtc,
+                "MEDIUM",
+                $"Application session expired: {session.Application}");
+
+            sessions.Remove(session.ProcessId);
+        }
+    }
+
+    private void ExpireCrashes(DateTime nowUtc)
+    {
+        recentCrashes.RemoveAll(
+            x =>
+                nowUtc - x.TimestampUtc >
+                crashCorrelationWindow);
+    }
+
+    private static void CloseSession(
+        ProcessSession session,
+        DateTime endUtc,
+        string confidence,
+        string summary)
+    {
+        Database.UpdateActivityEnd(
+            session.ActivityId,
+            endUtc,
+            confidence,
+            summary);
+    }
+
+    private static string DetermineSessionConfidence(
+        ProcessSession session)
+    {
+        if (session.EventCount >= 3)
+            return "HIGH";
+
+        if (session.EventCount >= 2)
+            return "MEDIUM";
+
+        return "LOW";
+    }
+
+    private static string BuildSessionSummary(
+        ProcessSession session)
+    {
+        string summary =
+            $"Application session: {session.Application}";
+
+        summary +=
+            $" | Events: {session.EventCount}";
+
+        if (session.NetworkEvents > 0)
+        {
+            summary +=
+                $" | Network events: {session.NetworkEvents}";
+        }
+
+        if (session.DeviceEvents > 0)
+        {
+            summary +=
+                $" | Device events: {session.DeviceEvents}";
+        }
+
+        return summary;
+    }
+}
+
+public class ProcessSession
+{
+    public long ActivityId { get; set; }
+
+    public int ProcessId { get; set; }
+
+    public int? ParentProcessId { get; set; }
+
+    public DateTime StartUtc { get; set; }
+
+    public string Application { get; set; } = "";
+    public string ProcessName { get; set; } = "";
+
+    public string UserName { get; set; } = "";
+
+    public int EventCount { get; set; }
+
+    public int NetworkEvents { get; set; }
+
+    public int DeviceEvents { get; set; }
+}
+
+public class RecentCrash
+{
+    public long ActivityId { get; set; }
+
+    public DateTime TimestampUtc { get; set; }
+
+    public int? ProcessId { get; set; }
+
+    public string Application { get; set; } = "";
+}
+
+
+// ============================================================
+// RAW WINDOWS EVENT MODEL
+// ============================================================
+
+public class RawEvent
+{
+    public long Id { get; set; }
+
+    public DateTime TimestampUtc { get; set; }
+
+    public string MachineId { get; set; } = "";
+
+    public string UserName { get; set; } = "";
+
+    public string Source { get; set; } = "";
+
+    public string Provider { get; set; } = "";
+
+    public int EventId { get; set; }
+
+    public string Level { get; set; } = "";
+
+    public string EventType { get; set; } = "";
+
+    public int? ProcessId { get; set; }
+    public string ProcessName { get; set; } = "";
+
+    public int? ParentProcessId { get; set; }
+
+
+    public string Application { get; set; } = "";
+
+    public string Message { get; set; } = "";
+
+    public string PayloadJson { get; set; } = "";
+}
+
+
+// ============================================================
+// ACTIVITY MODEL
+// ============================================================
+
+public class Activity
+{
+    public long Id { get; set; }
+
+    public DateTime StartUtc { get; set; }
+
+    public DateTime? EndUtc { get; set; }
+
+    public string MachineId { get; set; } = "";
+
+    public string UserName { get; set; } = "";
+
+    public string Type { get; set; } = "";
+
+    public string Application { get; set; } = "";
+
+    public int? ProcessId { get; set; }
+
+    public string Confidence { get; set; } = "";
+
+    public string Summary { get; set; } = "";
+
+    public DateTime CreatedUtc { get; set; }
+}
+
+
+
+
+
+
+public static class WindowsAuditManager
+{
+    public static bool IsAdministrator()
+    {
+        try
+        {
+            using var identity =
+                System.Security.Principal.WindowsIdentity.GetCurrent();
+
+            var principal =
+                new System.Security.Principal.WindowsPrincipal(identity);
+
+            return principal.IsInRole(
+                System.Security.Principal.WindowsBuiltInRole.Administrator);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public static bool RestartElevated()
+    {
+        try
+        {
+            string processPath =
+                Environment.ProcessPath ?? string.Empty;
+
+            if (string.IsNullOrWhiteSpace(processPath))
+            {
+                Console.WriteLine("[Security] Could not determine process path.");
+                return false;
+            }
+
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = processPath,
+                UseShellExecute = true,
+                Verb = "runas",
+                WorkingDirectory = Directory.GetCurrentDirectory()
+            };
+
+            // When running through "dotnet run", Environment.ProcessPath
+            // points to dotnet.exe. Preserve the project startup command.
+            if (Path.GetFileNameWithoutExtension(processPath)
+                    .Equals("dotnet", StringComparison.OrdinalIgnoreCase))
+            {
+                string project =
+                    Path.Combine(Directory.GetCurrentDirectory(),
+                                 "EventTracer.csproj");
+
+                psi.FileName = processPath;
+                psi.Arguments =
+                    $"run --no-build --project \"{project}\"";
+            }
+
+            using var process = System.Diagnostics.Process.Start(psi);
+
+            return process != null;
+        }
+        catch (System.ComponentModel.Win32Exception ex)
+            when (ex.NativeErrorCode == 1223)
+        {
+            // ERROR_CANCELLED:
+            // User clicked No on the UAC prompt.
+            Console.WriteLine("[Security] UAC request was cancelled.");
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine(
+                $"[Security] Failed to request elevation: {ex.Message}");
+
+            return false;
+        }
+    }
+
+    public static void EnableRequiredAuditing()
+    {
+        Console.WriteLine("[Security] Checking Windows audit policies...");
+
+        bool processCreation =
+            IsAuditEnabled("Process Creation");
+
+        bool processTermination =
+            IsAuditEnabled("Process Termination");
+
+        if (!processCreation)
+        {
+            Console.WriteLine(
+                "[Security] Enabling Process Creation auditing...");
+
+            RunAuditPol(
+                "/set /subcategory:\"Process Creation\" /success:enable");
+        }
+
+        if (!processTermination)
+        {
+            Console.WriteLine(
+                "[Security] Enabling Process Termination auditing...");
+
+            RunAuditPol(
+                "/set /subcategory:\"Process Termination\" /success:enable");
+        }
+
+        processCreation =
+            IsAuditEnabled("Process Creation");
+
+        processTermination =
+            IsAuditEnabled("Process Termination");
+
+        Console.WriteLine(
+            $"[Security] Process Creation: " +
+            $"{(processCreation ? "ENABLED" : "DISABLED")}");
+
+        Console.WriteLine(
+            $"[Security] Process Termination: " +
+            $"{(processTermination ? "ENABLED" : "DISABLED")}");
+    }
+
+    private static bool IsAuditEnabled(string subcategory)
+    {
+        string output = RunAuditPol(
+            $"/get /subcategory:\"{subcategory}\"");
+
+        if (string.IsNullOrWhiteSpace(output))
+            return false;
+
+        return output.Contains("Success", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string RunAuditPol(string arguments)
+    {
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "auditpol.exe",
+                Arguments = arguments,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+
+            using var process =
+                System.Diagnostics.Process.Start(psi);
+
+            if (process == null)
+                return string.Empty;
+
+            string stdout =
+                process.StandardOutput.ReadToEnd();
+
+            string stderr =
+                process.StandardError.ReadToEnd();
+
+            process.WaitForExit();
+
+            if (process.ExitCode != 0 &&
+                !string.IsNullOrWhiteSpace(stderr))
+            {
+                Console.WriteLine(
+                    $"[Security] auditpol: {stderr.Trim()}");
+            }
+
+            return stdout;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine(
+                $"[Security] auditpol error: {ex.Message}");
+
+            return string.Empty;
+        }
+    }
+
+    public static AuditStatus GetStatus()
+    {
+        bool administrator = IsAdministrator();
+
+        bool processCreation =
+            IsAuditEnabled("Process Creation");
+
+        bool processTermination =
+            IsAuditEnabled("Process Termination");
+
+        return new AuditStatus
+        {
+            Administrator = administrator,
+            ProcessCreation = processCreation,
+            ProcessTermination = processTermination,
+            Ready = administrator &&
+                    processCreation &&
+                    processTermination,
+            TimestampUtc = DateTime.UtcNow
+        };
+    }
+}
+
+public sealed class AuditStatus
+{
+    public bool Administrator { get; set; }
+
+    public bool ProcessCreation { get; set; }
+
+    public bool ProcessTermination { get; set; }
+
+    public bool Ready { get; set; }
+
+    public DateTime TimestampUtc { get; set; }
+}
+
+
